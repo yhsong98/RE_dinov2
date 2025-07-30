@@ -150,7 +150,7 @@ class ViTExtractor:
         model.interpolate_pos_encoding = types.MethodType(ViTExtractor._fix_pos_enc(patch_size, stride), model)
         return model
 
-    def preprocess(self, image_path: Union[str, Path],
+    def preprocess(self, image_path,
                    load_size: Union[int, Tuple[int, int]] = None, rotate=False):
         """
         Preprocesses an image before extraction.
@@ -160,7 +160,12 @@ class ViTExtractor:
                     (1) the preprocessed image as a tensor to insert the model of shape BxCxHxW.
                     (2) the pil image in relevant dimensions
         """
-        pil_image = Image.open(image_path).convert('RGB')
+        if isinstance(image_path, str):
+            pil_image = Image.open(image_path).convert('RGB')
+        else:
+            pil_image = cv2.cvtColor(image_path, cv2.COLOR_BGR2RGB)
+            pil_image = Image.fromarray(pil_image)
+
         new_H = (pil_image.height//self.p)*self.p
         new_W = (pil_image.width//self.p)*self.p
         pil_image = pil_image.resize((new_W, new_H))
@@ -174,10 +179,11 @@ class ViTExtractor:
             pil_images = [pil_image]
             for angle in rotate_angles:
                 pil_images.append(pil_image.rotate(angle))
-            prep_images = []
-            for pil_image in pil_images:
-                prep_images.append(prep(pil_image)[None, ...])
-            return list(zip(prep_images, pil_images))
+            prep_images = prep(pil_images[0])[None, ...]
+            for pil_image in pil_images[1::]:
+                prep_images = torch.cat((prep_images,prep(pil_image)[None, ...]),dim=0)
+            #return list(zip(prep_images, pil_images))
+            return prep_images, pil_images
         else:
             if load_size is not None:
                 #pil_image = transforms.Resize(load_size, interpolation=transforms.InterpolationMode.LANCZOS)(pil_image)

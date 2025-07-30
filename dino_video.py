@@ -1,6 +1,7 @@
 import argparse
 import os
 import torch
+from cupy import ndarray
 from sklearn.cluster import DBSCAN
 from extractor import ViTExtractor
 import numpy as np
@@ -30,7 +31,7 @@ def chunk_cosine_sim(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return torch.stack(result_list, dim=2)  # Bx1x(t_x)x(t_y)
 
 
-def show_similarity_interactive(image_path_a: str, image_folder_path_b: str, mask_file, num_ref_points: int, load_size: int = 224, layer: int = 11,
+def show_similarity_interactive(image_path_a: str, cap, mask_file, num_ref_points: int, load_size: int = 224, layer: int = 11,
                                 facet: str = 'key', bin: bool = False, stride: int = 14, model_type: str = 'dinov2_vits14',
                                 num_sim_patches: int = 1, sim_threshold: float = 0.95, num_candidates: int = 10,
                                 num_rotations: int = 4, output_csv: bool = False, distance_threshold=10, alpha=0.3):
@@ -111,50 +112,43 @@ def show_similarity_interactive(image_path_a: str, image_folder_path_b: str, mas
 
 
     fig, axes = plt.subplots(2, 2, figsize=(30, 30))
+    plt.ion()
 
-    # axes[1][1].title.set_text('Placeholder')
-    # axes[1][1].set_axis_off()
-    # axes[1][1].imshow(Image.open('../data/images/placeholder.jpg'))
-    if os.path.isdir(image_folder_path_b):
-        all_files = os.listdir(image_folder_path_b)
-        images = [file for file in all_files if file.endswith(('.jpg', '.png', '.jpeg'))]
-        images.sort()
-    elif os.path.isfile(image_folder_path_b):
-        images = [image_folder_path_b]
-    #random.shuffle(images)
+    axes[0][0].title.set_text('A (reference)')
+    axes[0][0].set_axis_off()
+    axes[0][1].title.set_text('B (original orientation)')
+    axes[0][1].set_axis_off()
+    axes[1][0].title.set_text('C (rotated image)')
+    axes[1][0].set_axis_off()
+    axes[1][1].title.set_text('marked points on original')
+    axes[1][1].set_axis_off()
 
-    for image_path in images[::-1]:
+    reference_img = axes[0][0].imshow(image_pil_a)
+    orig_img = axes[0][1].imshow(image_pil_a)
+    rotated_img = axes[1][0].imshow(image_pil_a)
+    marked_rotated_img = axes[1][1].imshow(image_pil_a)
+    visible_patches = []
+
+    while True:
         start=time.time()
-        if os.path.isdir(image_folder_path_b):
-            image_path_b = os.path.join(image_folder_path_b, image_path)
-        elif os.path.isfile(image_folder_path_b):
-            image_path_b = image_folder_path_b
+        ret, frame = cap.read()
 
-        batch_b_rotations, image_b_rotations = extractor.preprocess(image_path_b, load_size, rotate=num_rotations)
+        if not ret:
+            print("Can't receive frame (stream end?). Exiting ...")
+            break
+
+        batch_b_rotations, image_b_rotations = extractor.preprocess(frame, load_size, rotate=num_rotations)
 
         descs_b_s = extractor.extract_descriptors(batch_b_rotations, layer, facet, bin, include_cls=True)
         #num_patches_b_rotations, load_size_b_rotations = [], []
         num_patches_b, load_size_b = extractor.num_patches, extractor.load_size
 
         # plot image_a and the chosen patch. if nothing marked chosen patch is cls patch.
-        axes[0][0].clear()
-        axes[0][0].title.set_text('A (reference)')
-        axes[0][0].set_axis_off()
-        axes[0][0].imshow(image_pil_a)
 
-        axes[0][1].clear()
-        axes[0][1].title.set_text('B (original orientation)')
-        axes[0][1].set_axis_off()
-        axes[0][1].imshow(batch_b_rotations[0][1])
-
-        axes[1][1].clear()
-        axes[1][1].set_axis_off()
-        axes[1][1].title.set_text('Marked Points on Original')
-        axes[1][1].imshow(batch_b_rotations[0][1])
+        orig_img.set_data(image_b_rotations[0])
 
 
         #ptses = np.asarray(landmarks)
-        similarities_rotations = []
 
         #test for remote control
         similarities_rotations = chunk_cosine_sim(descs_a, descs_b_s)
@@ -177,14 +171,12 @@ def show_similarity_interactive(image_path_a: str, image_folder_path_b: str, mas
         for i,rotation_degree in enumerate(rotation_degrees):
             rotations[i]=rotation_degree
         print('rotation_degree:',rotations[fittest_index])
-        print(image_path)
 
 
         image_pil_b = image_b_rotations[fittest_index]
-        axes[1][0].clear()
-        axes[1][0].set_axis_off()
-        axes[1][0].title.set_text('B (rotated)')
-        axes[1][0].imshow(image_pil_b)
+
+        rotated_img.set_data(image_pil_b)
+        marked_rotated_img.set_data(image_pil_b)
 
         a_landmark_points=[]
         b_landmark_points=[]
@@ -215,6 +207,11 @@ def show_similarity_interactive(image_path_a: str, image_folder_path_b: str, mas
         radius_A = image_pil_a.size[0] / 80
         radius_B = image_pil_b.size[0] / 80
 
+        # reset previous marks
+        for patch in visible_patches:
+           patch.remove()
+        visible_patches.clear()
+
         count=0
         for id, pt in enumerate(zip(a_landmark_points,b_landmark_points)):
 
@@ -222,12 +219,18 @@ def show_similarity_interactive(image_path_a: str, image_folder_path_b: str, mas
             axes[0][0].add_patch(patch_a)
             output_reference.append(pt[0])
             label = axes[0][0].annotate(str(count), xy=pt[0], fontsize=6, ha="center")
+            visible_patches.append(patch_a)
+            visible_patches.append(label)
 
             patch_b = plt.Circle(pt[1], radius_B, color=color_map[count%len(color_map)],alpha=alpha)
             axes[1][0].add_patch(patch_b)
             output_rotated_coords.append(pt[1])
             label = axes[1][0].annotate(str(count), xy=pt[1], fontsize=6, ha="center")
+            visible_patches.append(patch_b)
+            visible_patches.append(label)
+
             count += 1
+
 
         output_target = []
         landmarks_on_original = rotate_landmarks(image_pil_b.size,output_rotated_coords,rotations[fittest_index])
@@ -237,6 +240,8 @@ def show_similarity_interactive(image_path_a: str, image_folder_path_b: str, mas
             axes[1][1].add_patch(patch_d)
             output_target.append(pt)
             label = axes[1][1].annotate(str(id), xy=pt, fontsize=6, ha="center")
+            visible_patches.append(patch_d)
+            visible_patches.append(label)
 
 
         if output_csv:
@@ -249,94 +254,93 @@ def show_similarity_interactive(image_path_a: str, image_folder_path_b: str, mas
         print("-----------")
 
         #Interactive Part
-        pts = np.asarray(plt.ginput(1, timeout=-1, mouse_stop=plt.MouseButton.RIGHT, mouse_pop=None))
-        visible_patches = []
-        while len(pts) == 1:
-            print('Picked point at:', pts)
+        #pts = np.asarray(plt.ginput(1, timeout=-1, mouse_stop=plt.MouseButton.RIGHT, mouse_pop=None))
+        pts = np.asarray([[130,130]])
+        print(pts)
+        #pts = [(100,100),(100,100)]
 
-            y_coor, x_coor = int(pts[0,1]), int(pts[0,0])
-            new_H = patch_size / stride * (load_size_a[0] // patch_size - 1) + 1
-            new_W = patch_size / stride * (load_size_a[1] // patch_size - 1) + 1
-            y_descs_coor = int(new_H / load_size_a[0] * y_coor)
-            x_descs_coor = int(new_W / load_size_a[1] * x_coor)
+        #while len(pts) == 1:
+        print('Picked point at:', pts)
 
-            # reset previous marks
-            for patch in visible_patches:
-                patch.remove()
-                visible_patches = []
+        y_coor, x_coor = int(pts[0,1]), int(pts[0,0])
+        new_H = patch_size / stride * (load_size_a[0] // patch_size - 1) + 1
+        new_W = patch_size / stride * (load_size_a[1] // patch_size - 1) + 1
+        y_descs_coor = int(new_H / load_size_a[0] * y_coor)
+        x_descs_coor = int(new_W / load_size_a[1] * x_coor)
 
-            # draw chosen point
+
+        # draw chosen point
+        center = ((x_descs_coor - 1) * stride + stride + patch_size // 2 - .5,
+                  (y_descs_coor - 1) * stride + stride + patch_size // 2 - .5)
+        patch = plt.Circle(center, radius_A, color=(1, 0, 0, 0.75))
+        axes[0][0].add_patch(patch)
+        visible_patches.append(patch)
+
+        raveled_desc_idx = num_patches_a[1] * y_descs_coor + x_descs_coor
+        reveled_desc_idx_including_cls = raveled_desc_idx + 1
+
+        curr_similarities = similarities_rotations[fittest_index,0,reveled_desc_idx_including_cls, 1:]
+        sims, idxs = torch.topk(curr_similarities, num_candidates)
+        if sims[0] < sim_threshold:
+            b_center=None
+            y_descs_coor, x_descs_coor = torch.div(idxs[0], num_patches_b[1], rounding_mode='floor'), idxs[0] % \
+                                                                                                  num_patches_b[1]
             center = ((x_descs_coor - 1) * stride + stride + patch_size // 2 - .5,
                       (y_descs_coor - 1) * stride + stride + patch_size // 2 - .5)
-            patch = plt.Circle(center, radius_A, color=(1, 0, 0, 0.75))
-            axes[0][0].add_patch(patch)
-            visible_patches.append(patch)
+            # patch = plt.Circle(center, radius, color=(1, 0, 0, 0.75))
+            #b_cand = [center[0].cpu().numpy(), center[1].cpu().numpy()]
 
-            raveled_desc_idx = num_patches_a[1] * y_descs_coor + x_descs_coor
-            reveled_desc_idx_including_cls = raveled_desc_idx + 1
-
-            curr_similarities = similarities_rotations[fittest_index,0,reveled_desc_idx_including_cls, 1:]
-            print(curr_similarities.shape)
-            sims, idxs = torch.topk(curr_similarities, num_candidates)
-            if sims[0] < sim_threshold:
-                b_center=None
-                y_descs_coor, x_descs_coor = torch.div(idxs[0], num_patches_b[1], rounding_mode='floor'), idxs[0] % \
-                                                                                                      num_patches_b[1]
+        else:
+            b_center = []
+            for idx, sim in zip(idxs, sims):
+                y_descs_coor, x_descs_coor = torch.div(idx, num_patches_b[1], rounding_mode='floor'), idx % num_patches_b[1]
                 center = ((x_descs_coor - 1) * stride + stride + patch_size // 2 - .5,
                           (y_descs_coor - 1) * stride + stride + patch_size // 2 - .5)
                 # patch = plt.Circle(center, radius, color=(1, 0, 0, 0.75))
-                #b_cand = [center[0].cpu().numpy(), center[1].cpu().numpy()]
+                b_center.append([center[0].cpu().numpy(), center[1].cpu().numpy()])
 
-            else:
-                b_center = []
-                for idx, sim in zip(idxs, sims):
-                    y_descs_coor, x_descs_coor = torch.div(idx, num_patches_b[1], rounding_mode='floor'), idx % num_patches_b[1]
-                    center = ((x_descs_coor - 1) * stride + stride + patch_size // 2 - .5,
-                              (y_descs_coor - 1) * stride + stride + patch_size // 2 - .5)
-                    # patch = plt.Circle(center, radius, color=(1, 0, 0, 0.75))
-                    b_center.append([center[0].cpu().numpy(), center[1].cpu().numpy()])
+        print('Sim:', sims[0])
 
-            print('Sim:', sims[0])
+        try:
+            if b_center:
+                best_match_B, predicted_B, min_distance = resolve_ambiguity_tps(pts[0], b_center, output_reference, output_rotated_coords)
 
-            try:
-                if b_center:
-                    best_match_B, predicted_B, min_distance = resolve_ambiguity_mls(pts[0], b_center, output_reference, output_rotated_coords)
-
-                    if min_distance>distance_threshold:
-                        patch = plt.Circle(best_match_B, radius_B, color='green')
-                        axes[1][0].add_patch(patch)
-                        visible_patches.append(patch)
-                        color='green'
-                    else:
-                        patch = plt.Circle(b_center[0], radius_B, color='red')
-                        axes[1][0].add_patch(patch)
-                        visible_patches.append(patch)
-                        color = 'red'
-                else:
-                    best_match_B = resolve_ambiguity_mls(pts[0], b_center, output_reference, output_rotated_coords)
-                    patch = plt.Circle(best_match_B, radius_B, color='blue')
+                if min_distance>distance_threshold:
+                    patch = plt.Circle(best_match_B, radius_B, color='green')
                     axes[1][0].add_patch(patch)
                     visible_patches.append(patch)
-                    color = 'blue'
-
-            except:
-                y_descs_coor, x_descs_coor = torch.div(idxs[0], num_patches_b[1], rounding_mode='floor'), idxs[0] % \
-                                                                                                      num_patches_b[1]
-                center = ((x_descs_coor - 1) * stride + stride + patch_size // 2 - .5,
-                          (y_descs_coor - 1) * stride + stride + patch_size // 2 - .5)
-                patch = plt.Circle((center[0].cpu().numpy(), center[1].cpu().numpy()), radius_B, color='red')
+                    color='green'
+                else:
+                    patch = plt.Circle(b_center[0], radius_B, color='red')
+                    axes[1][0].add_patch(patch)
+                    visible_patches.append(patch)
+                    color = 'red'
+            else:
+                best_match_B = resolve_ambiguity_tps(pts[0], b_center, output_reference, output_rotated_coords)
+                patch = plt.Circle(best_match_B, radius_B, color='blue')
                 axes[1][0].add_patch(patch)
                 visible_patches.append(patch)
-                color = 'red'
-            point_on_origin = [patch.center]
-            landmarks_on_original = rotate_landmarks(image_pil_b.size, point_on_origin, rotations[fittest_index])
-            patch_origin = plt.Circle(landmarks_on_original[0], radius_B, color=color)
-            axes[1][1].add_patch(patch_origin)
-            visible_patches.append(patch_origin)
-            #extent = axes[1][1].get_window_extent().transformed(fig.dpi_scale_trans.inverted())
-            #fig.savefig('ax11_figure.png', bbox_inches=extent)
-            plt.draw()
-            pts = np.asarray(plt.ginput(1, timeout=-1, mouse_stop=plt.MouseButton.RIGHT, mouse_pop=None))
+                color = 'blue'
+
+        except:
+            y_descs_coor, x_descs_coor = torch.div(idxs[0], num_patches_b[1], rounding_mode='floor'), idxs[0] % \
+                                                                                                  num_patches_b[1]
+            center = ((x_descs_coor - 1) * stride + stride + patch_size // 2 - .5,
+                      (y_descs_coor - 1) * stride + stride + patch_size // 2 - .5)
+            patch = plt.Circle((center[0].cpu().numpy(), center[1].cpu().numpy()), radius_B, color='red')
+            axes[1][0].add_patch(patch)
+            visible_patches.append(patch)
+            color = 'red'
+        point_on_origin = [patch.center]
+        landmarks_on_original = rotate_landmarks(image_pil_b.size, point_on_origin, rotations[fittest_index])
+        patch_origin = plt.Circle(landmarks_on_original[0], radius_B, color=color)
+        axes[1][1].add_patch(patch_origin)
+        visible_patches.append(patch_origin)
+        #extent = axes[1][1].get_window_extent().transformed(fig.dpi_scale_trans.inverted())
+        #fig.savefig('ax11_figure.png', bbox_inches=extent)
+        plt.draw()
+        plt.pause(0.01)
+            #pts = np.asarray(plt.ginput(1, timeout=-1, mouse_stop=plt.MouseButton.RIGHT, mouse_pop=None))
 
 
 """ taken from https://stackoverflow.com/questions/15008758/parsing-boolean-values-with-argparse"""
@@ -564,9 +568,9 @@ def resolve_ambiguity_tps(point_A, candidates_B, landmarks_A, landmarks_B):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Facilitate similarity inspection between two images.')
-    parser.add_argument('--image_a', type=str, default="../data/dino/landmark_files/cat_face_source.jpg", help='Path to the reference image.')
+    parser.add_argument('--image_a', type=str, default="../data/dino/landmark_files/face.png", help='Path to the reference image.')
     parser.add_argument('--mask_file', default=None, type=str, help="A semantic mask can be added to focus on the target object.")
-    parser.add_argument('--image_b', type=str, default="../data/dino/landmark_files/cat_5_180.jpg", help='Path to the target images.')
+    parser.add_argument('--image_b', type=str, default="../data/dino/wild_rotated_masked", help='Path to the target images.')
     parser.add_argument('--load_size', default=224, type=int, help='load size of the input image.')
     parser.add_argument('--stride', default=14, type=int, help="stride of first convolution layer. small stride -> higher resolution.")
     parser.add_argument('--model_type', default='dinov2_vits14', type=str,
@@ -580,14 +584,14 @@ if __name__ == "__main__":
     parser.add_argument('--num_sim_patches', default=20, type=int, help="number of closest patches to show.")
     parser.add_argument('--num_ref_points', default=200, type=int, help="number of reference points to show.")
     parser.add_argument('--num_candidates', default=10, type=int, help="number of target point candidates.")
-    parser.add_argument('--sim_threshold', default=0.95, type=float, help="similarity threshold.")
-    parser.add_argument('--distance_threshold', default=15, type=float, help="distance threshold for TPS.")
+    parser.add_argument('--sim_threshold', default=0.97, type=float, help="similarity threshold.")
+    parser.add_argument('--distance_threshold', default=20, type=float, help="distance threshold for TPS.")
     parser.add_argument('--num_rotation', default=4, type=int, help="number of test rotations, 4 or 8 recommended")
     parser.add_argument('--output_csv', default=False, type=str,help="CSV file to save landmark points.")
     args = parser.parse_args()
 
     with torch.no_grad():
-        landmarks = show_similarity_interactive(args.image_a, args.image_b, args.mask_file, args.num_ref_points,
+        landmarks = show_similarity_interactive(args.image_a, cv2.VideoCapture(1), args.mask_file, args.num_ref_points,
                                                 args.load_size,
                                                 args.layer, args.facet, args.bin,
                                                 args.stride, args.model_type, args.num_sim_patches,
