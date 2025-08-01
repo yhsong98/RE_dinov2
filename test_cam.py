@@ -1,7 +1,7 @@
 import cv2
 
 def igen_frames():
-    cap = cv2.VideoCapture(1) #resolved, correct position
+    cap = cv2.VideoCapture(0) #resolved, correct position
 
     if not cap.isOpened():
         print("Cannot open camera")

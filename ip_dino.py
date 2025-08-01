@@ -564,9 +564,9 @@ def resolve_ambiguity_tps(point_A, candidates_B, landmarks_A, landmarks_B):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Facilitate similarity inspection between two images.')
-    parser.add_argument('--image_a', type=str, default="../data/dino/landmark_files/cat_face_source.jpg", help='Path to the reference image.')
-    parser.add_argument('--mask_file', default=None, type=str, help="A semantic mask can be added to focus on the target object.")
-    parser.add_argument('--image_b', type=str, default="../data/dino/landmark_files/cat_5_180.jpg", help='Path to the target images.')
+    parser.add_argument('--image_a', type=str, default="../data/dino/landmark_files/pipette_s.png", help='Path to the reference image.')
+    parser.add_argument('--mask_file', default="../data/dino/landmark_files/pipette_s_mask.png", type=str, help="A semantic mask can be added to focus on the target object.")
+    parser.add_argument('--image_b', type=str, default="../data/dino/landmark_files/pipette.png", help='Path to the target images.')
     parser.add_argument('--load_size', default=224, type=int, help='load size of the input image.')
     parser.add_argument('--stride', default=14, type=int, help="stride of first convolution layer. small stride -> higher resolution.")
     parser.add_argument('--model_type', default='dinov2_vits14', type=str,
@@ -581,7 +581,7 @@ if __name__ == "__main__":
     parser.add_argument('--num_ref_points', default=200, type=int, help="number of reference points to show.")
     parser.add_argument('--num_candidates', default=10, type=int, help="number of target point candidates.")
     parser.add_argument('--sim_threshold', default=0.95, type=float, help="similarity threshold.")
-    parser.add_argument('--distance_threshold', default=15, type=float, help="distance threshold for TPS.")
+    parser.add_argument('--distance_threshold', default=10, type=float, help="distance threshold for TPS.")
     parser.add_argument('--num_rotation', default=4, type=int, help="number of test rotations, 4 or 8 recommended")
     parser.add_argument('--output_csv', default=False, type=str,help="CSV file to save landmark points.")
     args = parser.parse_args()

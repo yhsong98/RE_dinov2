@@ -123,14 +123,22 @@ def show_similarity_interactive(image_path_a: str, cap, mask_file, num_ref_point
     axes[1][1].title.set_text('marked points on original')
     axes[1][1].set_axis_off()
 
+    _, frame = cap.read()
+    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+
     reference_img = axes[0][0].imshow(image_pil_a)
-    orig_img = axes[0][1].imshow(image_pil_a)
-    rotated_img = axes[1][0].imshow(image_pil_a)
-    marked_rotated_img = axes[1][1].imshow(image_pil_a)
+    orig_img = axes[0][1].imshow(frame)
+    rotated_img = axes[1][0].imshow(frame)
+    marked_rotated_img = axes[1][1].imshow(frame)
     visible_patches = []
+    fps_counter = 0
 
     while True:
-        start=time.time()
+
+        if fps_counter == 0:
+            start=time.time()
+
         ret, frame = cap.read()
 
         if not ret:
@@ -138,12 +146,9 @@ def show_similarity_interactive(image_path_a: str, cap, mask_file, num_ref_point
             break
 
         batch_b_rotations, image_b_rotations = extractor.preprocess(frame, load_size, rotate=num_rotations)
-
-        descs_b_s = extractor.extract_descriptors(batch_b_rotations, layer, facet, bin, include_cls=True)
+        descs_b_s = extractor.extract_descriptors(batch_b_rotations.to(device), layer, facet, bin, include_cls=True)
         #num_patches_b_rotations, load_size_b_rotations = [], []
         num_patches_b, load_size_b = extractor.num_patches, extractor.load_size
-
-        # plot image_a and the chosen patch. if nothing marked chosen patch is cls patch.
 
         orig_img.set_data(image_b_rotations[0])
 
@@ -164,13 +169,13 @@ def show_similarity_interactive(image_path_a: str, cap, mask_file, num_ref_point
         counts = torch.bincount(flat_indices,minlength=similarity.shape[0])
         fittest_index = counts.argmax().item()
 
-        print(fittest_index)
+        #print(fittest_index)
         #
         rotation_degrees = [angle for angle in np.linspace(0, 360, num_rotations, endpoint=False)]
         rotations = {}
         for i,rotation_degree in enumerate(rotation_degrees):
             rotations[i]=rotation_degree
-        print('rotation_degree:',rotations[fittest_index])
+        #print('rotation_degree:',rotations[fittest_index])
 
 
         image_pil_b = image_b_rotations[fittest_index]
@@ -181,11 +186,11 @@ def show_similarity_interactive(image_path_a: str, cap, mask_file, num_ref_point
         a_landmark_points=[]
         b_landmark_points=[]
         real_landmark_points=[]
-        multi_curr_similarities = similarities_rotations[fittest_index,:,landmark_idx,1:].squeeze(0)
+        multi_curr_similarities = similarities_rotations[fittest_index,0,landmark_idx,1:]
 
         for landmark_id, curr_similarities in enumerate(multi_curr_similarities):
             center_b_candidates = []
-            sims, idxes = torch.topk(curr_similarities.flatten(), num_sim_patches)
+            sims, idxes = torch.topk(curr_similarities, num_sim_patches)
             for sim,idx in zip(sims, idxes):
                 if sim > sim_threshold:
                     b_y_descs_coor, b_x_descs_coor = torch.div(idx, num_patches_b[1], rounding_mode='floor'), idx % \
@@ -199,8 +204,8 @@ def show_similarity_interactive(image_path_a: str, cap, mask_file, num_ref_point
                 b_landmark_points.append(center_b_candidates[0])
 
 
-        print('num_landmark_points:',len(real_landmark_points))
-        print('num_confident_points:',len(a_landmark_points))
+        #print('num_landmark_points:',len(real_landmark_points))
+        #print('num_confident_points:',len(a_landmark_points))
 
         output_reference = []
         output_rotated_coords = []
@@ -250,17 +255,17 @@ def show_similarity_interactive(image_path_a: str, cap, mask_file, num_ref_point
             #np.savetxt('rotated_coords.csv',rotated_coords,delimiter=',')
         plt.draw()
 
-        print('time:', time.time() - start)
-        print("-----------")
+        #print('fps:', (time.time() - start)/10)
+        #print("-----------")
 
         #Interactive Part
         #pts = np.asarray(plt.ginput(1, timeout=-1, mouse_stop=plt.MouseButton.RIGHT, mouse_pop=None))
-        pts = np.asarray([[130,130]])
-        print(pts)
+        pts = np.asarray([[130,120]])
+        #print(pts)
         #pts = [(100,100),(100,100)]
 
         #while len(pts) == 1:
-        print('Picked point at:', pts)
+        #print('Picked point at:', pts)
 
         y_coor, x_coor = int(pts[0,1]), int(pts[0,0])
         new_H = patch_size / stride * (load_size_a[0] // patch_size - 1) + 1
@@ -283,13 +288,6 @@ def show_similarity_interactive(image_path_a: str, cap, mask_file, num_ref_point
         sims, idxs = torch.topk(curr_similarities, num_candidates)
         if sims[0] < sim_threshold:
             b_center=None
-            y_descs_coor, x_descs_coor = torch.div(idxs[0], num_patches_b[1], rounding_mode='floor'), idxs[0] % \
-                                                                                                  num_patches_b[1]
-            center = ((x_descs_coor - 1) * stride + stride + patch_size // 2 - .5,
-                      (y_descs_coor - 1) * stride + stride + patch_size // 2 - .5)
-            # patch = plt.Circle(center, radius, color=(1, 0, 0, 0.75))
-            #b_cand = [center[0].cpu().numpy(), center[1].cpu().numpy()]
-
         else:
             b_center = []
             for idx, sim in zip(idxs, sims):
@@ -299,7 +297,7 @@ def show_similarity_interactive(image_path_a: str, cap, mask_file, num_ref_point
                 # patch = plt.Circle(center, radius, color=(1, 0, 0, 0.75))
                 b_center.append([center[0].cpu().numpy(), center[1].cpu().numpy()])
 
-        print('Sim:', sims[0])
+        #print('Sim:', sims[0])
 
         try:
             if b_center:
@@ -330,7 +328,7 @@ def show_similarity_interactive(image_path_a: str, cap, mask_file, num_ref_point
             patch = plt.Circle((center[0].cpu().numpy(), center[1].cpu().numpy()), radius_B, color='red')
             axes[1][0].add_patch(patch)
             visible_patches.append(patch)
-            color = 'red'
+            color = 'orange'
         point_on_origin = [patch.center]
         landmarks_on_original = rotate_landmarks(image_pil_b.size, point_on_origin, rotations[fittest_index])
         patch_origin = plt.Circle(landmarks_on_original[0], radius_B, color=color)
@@ -339,7 +337,11 @@ def show_similarity_interactive(image_path_a: str, cap, mask_file, num_ref_point
         #extent = axes[1][1].get_window_extent().transformed(fig.dpi_scale_trans.inverted())
         #fig.savefig('ax11_figure.png', bbox_inches=extent)
         plt.draw()
-        plt.pause(0.01)
+        fps_counter+=1
+        if fps_counter == 10:
+            print('fps:', (time.time()-start)*fps_counter)
+            fps_counter=0
+        plt.pause(0.001)
             #pts = np.asarray(plt.ginput(1, timeout=-1, mouse_stop=plt.MouseButton.RIGHT, mouse_pop=None))
 
 
@@ -555,7 +557,7 @@ def resolve_ambiguity_tps(point_A, candidates_B, landmarks_A, landmarks_B):
         candidates_B = np.array(candidates_B)
         distances = cdist([predicted_point_B], candidates_B, metric='euclidean')
         min_distance = min(distances[0])
-        print("min_distance:",min_distance)
+        #print("min_distance:",min_distance)
         best_match_idx = np.argmin(distances)
         # if min(distances[0]) < 10:
         #     return tuple(candidates_B[best_match_idx])  # Best-matched candidate
@@ -569,7 +571,7 @@ def resolve_ambiguity_tps(point_A, candidates_B, landmarks_A, landmarks_B):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Facilitate similarity inspection between two images.')
     parser.add_argument('--image_a', type=str, default="../data/dino/landmark_files/face.png", help='Path to the reference image.')
-    parser.add_argument('--mask_file', default=None, type=str, help="A semantic mask can be added to focus on the target object.")
+    parser.add_argument('--mask_file', default="../data/dino/landmark_files/pipette_s_mask.png", type=str, help="A semantic mask can be added to focus on the target object.")
     parser.add_argument('--image_b', type=str, default="../data/dino/wild_rotated_masked", help='Path to the target images.')
     parser.add_argument('--load_size', default=224, type=int, help='load size of the input image.')
     parser.add_argument('--stride', default=14, type=int, help="stride of first convolution layer. small stride -> higher resolution.")
@@ -584,14 +586,14 @@ if __name__ == "__main__":
     parser.add_argument('--num_sim_patches', default=20, type=int, help="number of closest patches to show.")
     parser.add_argument('--num_ref_points', default=200, type=int, help="number of reference points to show.")
     parser.add_argument('--num_candidates', default=10, type=int, help="number of target point candidates.")
-    parser.add_argument('--sim_threshold', default=0.97, type=float, help="similarity threshold.")
+    parser.add_argument('--sim_threshold', default=0.95, type=float, help="similarity threshold.")
     parser.add_argument('--distance_threshold', default=20, type=float, help="distance threshold for TPS.")
     parser.add_argument('--num_rotation', default=4, type=int, help="number of test rotations, 4 or 8 recommended")
     parser.add_argument('--output_csv', default=False, type=str,help="CSV file to save landmark points.")
     args = parser.parse_args()
 
     with torch.no_grad():
-        landmarks = show_similarity_interactive(args.image_a, cv2.VideoCapture(1), args.mask_file, args.num_ref_points,
+        landmarks = show_similarity_interactive(args.image_a, cv2.VideoCapture(0), args.mask_file, args.num_ref_points,
                                                 args.load_size,
                                                 args.layer, args.facet, args.bin,
                                                 args.stride, args.model_type, args.num_sim_patches,

@@ -161,7 +161,9 @@ class ViTExtractor:
                     (2) the pil image in relevant dimensions
         """
         if isinstance(image_path, str):
-            pil_image = Image.open(image_path).convert('RGB')
+            pil_image = cv2.imread(image_path, cv2.IMREAD_COLOR)
+            pil_image = cv2.cvtColor(pil_image, cv2.COLOR_BGR2RGB)
+            pil_image = Image.fromarray(pil_image)
         else:
             pil_image = cv2.cvtColor(image_path, cv2.COLOR_BGR2RGB)
             pil_image = Image.fromarray(pil_image)
