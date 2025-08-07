@@ -190,7 +190,7 @@ class ViTExtractor:
             if load_size is not None:
                 #pil_image = transforms.Resize(load_size, interpolation=transforms.InterpolationMode.LANCZOS)(pil_image)
                 prep_img = prep(pil_image)[None, ...]
-            return prep_img, pil_image
+            return prep_img, [pil_image]
 
     def v_preprocess(self, video_path: Union[str, Path],
                      load_size: Union[int, Tuple[int, int]] = None):

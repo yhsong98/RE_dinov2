@@ -12,7 +12,10 @@ import cv2
 from scipy.spatial.distance import cdist
 from scipy.interpolate import RBFInterpolator
 from skimage.transform import PiecewiseAffineTransform, warp
+from skimage.measure import label
 import random
+from PIL import Image
+import torch.nn.functional as F
 matplotlib.use('Qt5Agg')
 
 def chunk_cosine_sim(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -31,7 +34,7 @@ def chunk_cosine_sim(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return torch.stack(result_list, dim=2)  # Bx1x(t_x)x(t_y)
 
 
-def show_similarity_interactive(image_path_a: str, cap, mask_file, num_ref_points: int, load_size: int = 224, layer: int = 11,
+def show_similarity_interactive(image_path_a: str, cap, mask_file, image_path_b, num_ref_points: int, load_size: int = 224, layer: int = 11,
                                 facet: str = 'key', bin: bool = False, stride: int = 14, model_type: str = 'dinov2_vits14',
                                 num_sim_patches: int = 1, sim_threshold: float = 0.95, num_candidates: int = 10,
                                 num_rotations: int = 4, output_csv: bool = False, distance_threshold=10, alpha=0.3, show_landmarks_on_target: bool = False,):
@@ -61,55 +64,8 @@ def show_similarity_interactive(image_path_a: str, cap, mask_file, num_ref_point
     descs_a = extractor.extract_descriptors(image_batch_a.to(device), layer, facet, bin, include_cls=True)
     num_patches_a, load_size_a = extractor.num_patches, extractor.load_size
 
-    if mask_file:
-        mask = cv2.resize(cv2.imread(mask_file, cv2.IMREAD_GRAYSCALE),(load_size_a[1],load_size_a[0]))
-        coords = cv2.findNonZero(mask)
-        if coords is not None:
-            coords_list = coords.reshape(-1, 2).tolist()
-            landmarks = random.sample(coords_list, num_ref_points)
-        else:
-            landmarks = []
-    else:
-        coords = cv2.findNonZero(np.ones((load_size_a[0],load_size_a[1])))
-        coords_list = coords.reshape(-1, 2).tolist()
-        landmarks = random.sample(coords_list, num_ref_points)
-
-    a_to_a_similarities = chunk_cosine_sim(descs_a, descs_a)
-    #a_to_a_curr_similarities = a_to_a_similarities[0, 0, 0, 1:]
-    #a_to_a_curr_similarities = a_to_a_curr_similarities.reshape(num_patches_a)
-
-    ptses = np.asarray(landmarks)
-    landmarks = []
-    landmark_idx = []
-    for idx, pt in enumerate(ptses):
-        y_coor, x_coor = int(pt[1]), int(pt[0])
-        new_H = patch_size / stride * (load_size_a[0] // patch_size - 1) + 1
-        new_W = patch_size / stride * (load_size_a[1] // patch_size - 1) + 1
-        y_descs_coor = int(new_H / load_size_a[0] * y_coor)
-        x_descs_coor = int(new_W / load_size_a[1] * x_coor)
-
-        # get and draw current similarities
-        raveled_desc_idx = num_patches_a[1] * y_descs_coor + x_descs_coor
-        reveled_desc_idx_including_cls = raveled_desc_idx + 1
-
-        a_to_a_curr_similarities = a_to_a_similarities[0, 0, reveled_desc_idx_including_cls, 1:]
-        #a_to_a_curr_similarities = a_to_a_curr_similarities.reshape(num_patches_a)
-
-        center_a_t_candidates = []
-        sims, idxes = torch.topk(a_to_a_curr_similarities, num_sim_patches)
-        for sim, idx in zip(sims, idxes):
-            if sim > sim_threshold:
-                a_t_y_descs_coor, a_t_x_descs_coor = torch.div(idx, num_patches_a[1],
-                                                           rounding_mode='floor'), idx % \
-                                                                                   num_patches_a[1]
-                center_a_t = ((a_t_x_descs_coor - 1) * stride + stride + patch_size // 2 - .5,
-                            (a_t_y_descs_coor - 1) * stride + stride + patch_size // 2 - .5)
-                center_a_t_candidates.append([center_a_t[0].cpu().numpy(), center_a_t[1].cpu().numpy()])
-
-        if len(center_a_t_candidates) > 1 and classify_landmark(center_a_t_candidates)['label']:
-            landmarks.append(pt)
-            landmark_idx.append(reveled_desc_idx_including_cls)
-
+    descs_a = get_masked_descriptors(descs_a.squeeze(1)[:,1:,:], num_patches_a, mask_file, device=device)
+    print(descs_a.shape)
 
     fig, axes = plt.subplots(2, 2, figsize=(30, 30))
     plt.ion()
@@ -153,204 +109,54 @@ def show_similarity_interactive(image_path_a: str, cap, mask_file, num_ref_point
             print("Can't receive frame (stream end?). Exiting ...")
             break
 
-        batch_b_rotations, image_b_rotations = extractor.preprocess(frame, load_size, rotate=num_rotations)
-        descs_b_s = extractor.extract_descriptors(batch_b_rotations.to(device), layer, facet, bin, include_cls=True)
-        #num_patches_b_rotations, load_size_b_rotations = [], []
-        num_patches_b, load_size_b = extractor.num_patches, extractor.load_size
-
-        orig_img.set_data(image_b_rotations[0])
-
-
-        #ptses = np.asarray(landmarks)
-
-        #test for remote control
-        similarities_rotations = chunk_cosine_sim(descs_a, descs_b_s)
-
-        landmark_idx = torch.LongTensor(landmark_idx)
-
-        similarity = similarities_rotations[:,:,landmark_idx,:]
-        similarity = similarity.squeeze(1)
-
-        max_batch_value = torch.max(similarity[:,1:,1:], dim=2)[0]
-        max_batch_indices = torch.argmax(max_batch_value, dim=0)
-        flat_indices = max_batch_indices.view(-1)
-        counts = torch.bincount(flat_indices,minlength=similarity.shape[0])
-        fittest_index = counts.argmax().item()
-
-        #print(fittest_index)
+        # batch_
+        # batch_b_rotations, image_b_rotations = extractor.preprocess(frame, load_size, rotate=num_rotations)
+        # descs_b_s = extractor.extract_descriptors(batch_b_rotations.to(device), layer, facet, bin, include_cls=True)
+        # #num_patches_b_rotations, load_size_b_rotations = [], []
+        # num_patches_b, load_size_b = extractor.num_patches, extractor.load_size
         #
-        rotation_degrees = [angle for angle in np.linspace(0, 360, num_rotations, endpoint=False)]
-        rotations = {}
-        for i,rotation_degree in enumerate(rotation_degrees):
-            rotations[i]=rotation_degree
-        #print('rotation_degree:',rotations[fittest_index])
-
-
-        image_pil_b = image_b_rotations[fittest_index]
-
-        rotated_img.set_data(image_pil_b)
-        marked_rotated_img.set_data(image_b_rotations[0])
-
-        a_landmark_points=[]
-        b_landmark_points=[]
-        real_landmark_points=[]
-        multi_curr_similarities = similarities_rotations[fittest_index,0,landmark_idx,1:]
-
-        for landmark_id, curr_similarities in enumerate(multi_curr_similarities):
-            center_b_candidates = []
-            sims, idxes = torch.topk(curr_similarities, num_sim_patches)
-            for sim,idx in zip(sims, idxes):
-                if sim > sim_threshold:
-                    b_y_descs_coor, b_x_descs_coor = torch.div(idx, num_patches_b[1], rounding_mode='floor'), idx % \
-                                                     num_patches_b[1]
-                    center_b = ((b_x_descs_coor - 1) * stride + stride + patch_size // 2 - .5,
-                                (b_y_descs_coor - 1) * stride + stride + patch_size // 2 - .5)
-                    center_b_candidates.append([center_b[0].cpu().numpy(), center_b[1].cpu().numpy()])
-
-            if len(center_b_candidates) > 1 and classify_landmark(center_b_candidates)['label']:
-                a_landmark_points.append(landmarks[landmark_id])
-                b_landmark_points.append(center_b_candidates[0])
-
-
-        #print('num_landmark_points:',len(real_landmark_points))
-        #print('num_confident_points:',len(a_landmark_points))
-
-        output_reference = []
-        output_rotated_coords = []
-        radius_A = image_pil_a[0].size[0] / 80
-        radius_B = image_pil_b.size[0] / 80
-
-        # reset previous marks
-        for patch in visible_patches:
-           patch.remove()
-        visible_patches.clear()
-
-        count=0
-
-        if show_landmarks_on_target:
-            for id, pt in enumerate(zip(a_landmark_points,b_landmark_points)):
-
-                patch_a= plt.Circle(pt[0], radius_A, color=color_map[count%len(color_map)],alpha=alpha)
-                axes[0][0].add_patch(patch_a)
-                output_reference.append(pt[0])
-                label = axes[0][0].annotate(str(count), xy=pt[0], fontsize=6, ha="center")
-                visible_patches.append(patch_a)
-                visible_patches.append(label)
-
-                patch_b = plt.Circle(pt[1], radius_B, color=color_map[count%len(color_map)],alpha=alpha)
-                axes[1][0].add_patch(patch_b)
-                output_rotated_coords.append(pt[1])
-                label = axes[1][0].annotate(str(count), xy=pt[1], fontsize=6, ha="center")
-                visible_patches.append(patch_b)
-                visible_patches.append(label)
-
-                count += 1
-        else:
-            for id, pt in enumerate(zip(a_landmark_points, b_landmark_points)):
-                patch_a = plt.Circle(pt[0], radius_A, color=color_map[count % len(color_map)], alpha=alpha)
-                axes[0][0].add_patch(patch_a)
-                output_reference.append(pt[0])
-                label = axes[0][0].annotate(str(count), xy=pt[0], fontsize=6, ha="center")
-                visible_patches.append(patch_a)
-                visible_patches.append(label)
-
-                output_rotated_coords.append(pt[1])
-
-                count += 1
-
-
-        output_target = []
-        landmarks_on_original = rotate_landmarks(image_pil_b.size,output_rotated_coords,rotations[fittest_index])
-
-        if show_landmarks_on_target:
-            for id,pt in enumerate(landmarks_on_original):
-                patch_d =plt.Circle(pt,radius_B,color=color_map[id%len(color_map)], alpha=alpha)
-                axes[1][1].add_patch(patch_d)
-                output_target.append(pt)
-                label = axes[1][1].annotate(str(id), xy=pt, fontsize=6, ha="center")
-                visible_patches.append(patch_d)
-                visible_patches.append(label)
-
-        if output_csv:
-            np.savetxt('landmarks_A.csv',output_reference,delimiter=',')
-            np.savetxt('landmarks_B.csv',output_target,delimiter=',')
-            #np.savetxt('rotated_coords.csv',rotated_coords,delimiter=',')
-        plt.draw()
-
-        y_coor, x_coor = int(pts[0,1]), int(pts[0,0])
-        new_H = patch_size / stride * (load_size_a[0] // patch_size - 1) + 1
-        new_W = patch_size / stride * (load_size_a[1] // patch_size - 1) + 1
-        y_descs_coor = int(new_H / load_size_a[0] * y_coor)
-        x_descs_coor = int(new_W / load_size_a[1] * x_coor)
-
-
-        # draw chosen point
-        center = ((x_descs_coor - 1) * stride + stride + patch_size // 2 - .5,
-                  (y_descs_coor - 1) * stride + stride + patch_size // 2 - .5)
-        patch = plt.Circle(center, radius_A, color=(1, 0, 0, 0.75))
-        axes[0][0].add_patch(patch)
-        visible_patches.append(patch)
-
-        raveled_desc_idx = num_patches_a[1] * y_descs_coor + x_descs_coor
-        reveled_desc_idx_including_cls = raveled_desc_idx + 1
-
-        curr_similarities = similarities_rotations[fittest_index,0,reveled_desc_idx_including_cls, 1:]
-        sims, idxs = torch.topk(curr_similarities, num_candidates)
-        if sims[0] < sim_threshold:
-            b_center=None
-        else:
-            b_center = []
-            for idx, sim in zip(idxs, sims):
-                y_descs_coor, x_descs_coor = torch.div(idx, num_patches_b[1], rounding_mode='floor'), idx % num_patches_b[1]
-                center = ((x_descs_coor - 1) * stride + stride + patch_size // 2 - .5,
-                          (y_descs_coor - 1) * stride + stride + patch_size // 2 - .5)
-                # patch = plt.Circle(center, radius, color=(1, 0, 0, 0.75))
-                b_center.append([center[0].cpu().numpy(), center[1].cpu().numpy()])
+        batch_b, image_b = extractor.preprocess(frame, load_size, rotate=False)
+        descs_b = extractor.extract_descriptors(batch_b, layer, facet, bin, include_cls=True)
+        num_patches_b, load_size_b = extractor.num_patches, extractor.load_size
+        image_b=image_b[0]
+        orig_img.set_data(image_b)
+        regions = find_regions_by_reference_object(
+            descs_b.squeeze(1)[0,1:,:], descs_a, similarity_threshold=0.93
+        )
         try:
-            if b_center:
-                best_match_B, predicted_B, min_distance = resolve_ambiguity_tps(pts[0], b_center, output_reference, output_rotated_coords)
+            regions = merge_discontinuous_regions_by_feature(descs_b.squeeze(1)[0,1:,:], regions)
+        except ValueError:
+            pass
 
-                if min_distance>distance_threshold:
-                    patch = plt.Circle(best_match_B, radius_B, color='green')
-                    axes[1][0].add_patch(patch)
-                    visible_patches.append(patch)
-                    color='green'
-                else:
-                    patch = plt.Circle(b_center[0], radius_B, color='red')
-                    axes[1][0].add_patch(patch)
-                    visible_patches.append(patch)
-                    color = 'red'
-            else:
-                best_match_B = resolve_ambiguity_tps(pts[0], b_center, output_reference, output_rotated_coords)
-                patch = plt.Circle(best_match_B, radius_B, color='blue')
-                axes[1][0].add_patch(patch)
-                visible_patches.append(patch)
-                color = 'blue'
-        except:
-            y_descs_coor, x_descs_coor = torch.div(idxs[0], num_patches_b[1], rounding_mode='floor'), idxs[0] % \
-                                                                                                  num_patches_b[1]
-            center = ((x_descs_coor - 1) * stride + stride + patch_size // 2 - .5,
-                      (y_descs_coor - 1) * stride + stride + patch_size // 2 - .5)
-            patch = plt.Circle((center[0].cpu().numpy(), center[1].cpu().numpy()), radius_B, color='orange')
-            axes[1][0].add_patch(patch)
-            visible_patches.append(patch)
-            color = 'orange'
+        try:
+            instance, labels = classify_instance_count(regions, num_patches_b)
+        except ValueError:
+            labels=[0]*len(regions)
 
-        point_on_origin = [patch.center]
-        landmarks_on_original = rotate_landmarks(image_pil_b.size, point_on_origin, rotations[fittest_index])
-        patch_origin = plt.Circle(landmarks_on_original[0], radius_B, color=color)
-        axes[1][1].add_patch(patch_origin)
-        visible_patches.append(patch_origin)
-        #extent = axes[1][1].get_window_extent().transformed(fig.dpi_scale_trans.inverted())
-        #fig.savefig('ax11_figure.png', bbox_inches=extent)
-        plt.draw()
-        fps_counter+=1
-        if fps_counter == 10:
-            print('fps:', 10/(time.time()-start))
-            fps_counter=0
-        plt.pause(0.0001)
-            #pts = np.asarray(plt.ginput(1, timeout=-1, mouse_stop=plt.MouseButton.RIGHT, mouse_pop=None))
+        visualize_instance_labels_cv2(image_b,regions,labels,num_patches_b)
 
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+        # #mask show, for test usage
+        # mask = np.zeros(num_patches_b, dtype=np.uint8)
+        # for region in regions:
+        #     for idx in region:
+        #         y, x = divmod(idx, num_patches_b[1])
+        #         mask[y, x] = 1
+        #
+        # # Resize mask to image size
+        # mask_resized = cv2.resize(mask, (image_b.size[1], image_b.size[0]), interpolation=cv2.INTER_NEAREST)
+        #
+        # plt.figure(figsize=(10, 10))
+        # plt.imshow(image_b)
+        # plt.imshow(mask_resized, alpha=0.5, cmap='jet')  # Overlay mask
+        # plt.title("Target Image with Region Mask")
+        # plt.axis('off')
+        # plt.show()
+        #mask show
+
+    plt.close()
+    cap.release()
 
 """ taken from https://stackoverflow.com/questions/15008758/parsing-boolean-values-with-argparse"""
 def str2bool(v):
@@ -363,6 +169,280 @@ def str2bool(v):
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
+import matplotlib.pyplot as plt
+import numpy as np
+
+def visualize_instance_labels(image, regions, labels, num_patches_shape, alpha=0.4):
+    """
+    Overlay instance regions with different colors on the image.
+
+    :param image: The image as a numpy array (H, W, 3).
+    :param regions: List of arrays of token indices per region.
+    :param labels: Cluster label for each region.
+    :param num_patches_shape: (H, W) patch grid shape.
+    :param alpha: Transparency for overlay.
+    """
+    image = np.array(image)  # Ensure image is a numpy array
+    color_map = plt.cm.get_cmap('tab20', np.max(labels)+1)
+    mask = np.zeros((num_patches_shape[0], num_patches_shape[1], 3), dtype=np.float32)
+
+    for region, label in zip(regions, labels):
+        if label == -1:
+            continue  # skip noise
+        ys = [idx // num_patches_shape[1] for idx in region]
+        xs = [idx % num_patches_shape[1] for idx in region]
+        for y, x in zip(ys, xs):
+            mask[y, x, :] = color_map(label)[:3]
+
+    # Upscale mask to image size
+    mask_resized = cv2.resize(mask, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_NEAREST)
+    overlay = (image / 255.0) * (1 - alpha) + mask_resized * alpha
+
+    plt.figure(figsize=(10, 10))
+    plt.imshow(overlay)
+    plt.axis('off')
+    plt.title('Instance Regions Overlay')
+    plt.show()
+
+def visualize_instance_labels_cv2(image, regions, labels, num_patches_shape, alpha=0.4):
+    """
+    Overlay instance regions with different colors on the image using OpenCV.
+
+    :param image: The image as a numpy array (H, W, 3).
+    :param regions: List of arrays of token indices per region.
+    :param labels: Cluster label for each region.
+    :param num_patches_shape: (H, W) patch grid shape.
+    :param alpha: Transparency for overlay.
+    """
+    image = np.array(image)
+    mask = np.zeros((num_patches_shape[0], num_patches_shape[1], 3), dtype=np.uint8)
+    if len(regions) != 0:
+        num_labels = np.max(labels) + 1
+        rng = np.random.default_rng(42)
+        colors = rng.integers(0, 255, size=(num_labels, 3), dtype=np.uint8)
+
+        for region, label in zip(regions, labels):
+            if label == -1:
+                continue
+            ys = [idx // num_patches_shape[1] for idx in region]
+            xs = [idx % num_patches_shape[1] for idx in region]
+            for y, x in zip(ys, xs):
+                mask[y, x, :] = colors[label]
+
+    # Upscale mask to image size
+    mask_resized = cv2.resize(mask, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_NEAREST)
+    overlay = cv2.addWeighted(image, 1 - alpha, mask_resized, alpha, 0)
+    cv2.imshow('Instance Regions Overlay', cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+def merge_discontinuous_regions_by_feature(features_b, regions, feature_eps=0.1, min_samples=1):
+    """
+    Merge spatially discontinuous regions that belong to the same instance by feature similarity.
+
+    :param features_b: [N, C] tensor of target features.
+    :param regions: List of arrays of token indices per region.
+    :param feature_eps: DBSCAN epsilon for feature clustering.
+    :param min_samples: DBSCAN min_samples.
+    :return: List of merged region indices (each as a list).
+    """
+    # Compute mean feature for each region
+    region_features = []
+    for region in regions:
+        region_feat = features_b[region].mean(dim=0).cpu().numpy()
+        region_features.append(region_feat)
+    region_features = np.array(region_features)
+
+    # Cluster region features
+    clustering = DBSCAN(eps=feature_eps, min_samples=min_samples).fit(region_features)
+    labels = clustering.labels_
+
+    # Merge regions by cluster label
+    merged_regions = []
+    for label in set(labels):
+        if label == -1: continue
+        merged = np.concatenate([regions[i] for i in range(len(regions)) if labels[i] == label])
+        merged_regions.append(merged)
+    return merged_regions
+
+def get_masked_descriptors(features_a, num_patches_a, mask_path=None, device='cuda'):
+    """
+    Extract descriptors from image A at masked locations.
+
+    :param features_a: [1, N_a, C] tensor of reference image features (tokens).
+    :param num_patches_a: tuple (H, W) for reference image patch grid.
+    :param mask_path: path to mask image for reference.
+    :param device: torch device.
+    :return: [num_masked, C] tensor of masked descriptors.
+    """
+    B, N_a, C = features_a.shape
+    H_feat, W_feat = num_patches_a
+    features_a = features_a[0].reshape(H_feat, W_feat, C)  # [H, W, C]
+
+    if mask_path:
+        from PIL import Image
+        import numpy as np
+        mask = Image.open(mask_path).convert('L')
+        mask = mask.resize((W_feat, H_feat), resample=Image.NEAREST)
+        mask_tensor = torch.from_numpy(np.array(mask)).float()
+        mask_tensor = (mask_tensor > 128).float().to(device)
+        idx = torch.nonzero(mask_tensor)
+        masked_descs_a = features_a[idx[:,0], idx[:,1]]  # [num_masked, C]
+    else:
+        masked_descs_a = features_a.reshape(-1, C)  # Use all patches if no mask
+
+    return masked_descs_a
+
+def classify_instance_count(regions, num_patches_shape, eps=5, min_samples=1):
+    # Compute centroids for each region
+    centroids = []
+    for region in regions:
+        ys, xs = zip(*[(idx // num_patches_shape[1], idx % num_patches_shape[1]) for idx in region])
+        centroids.append([np.mean(xs), np.mean(ys)])
+    centroids = np.array(centroids)
+
+    # Cluster centroids
+    clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(centroids)
+    labels = clustering.labels_
+    num_instances = len(set(labels)) - (1 if -1 in labels else 0)
+    return num_instances, labels  # num_instances: number of detected instances
+
+def detect_object_regions(features, eps=20, min_samples=10):
+    # features: [N, C] (tokens/features for one frame)
+    # Use DBSCAN clustering on feature space to find object regions
+    from sklearn.cluster import DBSCAN
+    coords = np.array([[i // features.shape[1], i % features.shape[1]] for i in range(features.shape[0])])
+    clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(features.cpu().numpy())
+    labels = clustering.labels_
+    regions = []
+    for label in set(labels):
+        if label == -1: continue
+        region_indices = np.where(labels == label)[0]
+        regions.append(region_indices)
+    return regions  # List of arrays of token indices per region
+
+def crop_and_rotate(image, region_indices, num_rotations):
+    # Crop region from image and generate rotated crops
+    crops = []
+    for indices in region_indices:
+        # Compute bounding box from indices
+        ys, xs = zip(*[(i // image.shape[1], i % image.shape[1]) for i in indices])
+        y_min, y_max = min(ys), max(ys)
+        x_min, x_max = min(xs), max(xs)
+        crop = image[y_min:y_max+1, x_min:x_max+1]
+        rotated_crops = [np.rot90(crop, k) for k in range(num_rotations)]
+        crops.append(rotated_crops)
+    return crops  # List of [rotated_crop_0, ..., rotated_crop_N] per region
+
+
+def find_regions_by_reference_object(features_b, features_ref, similarity_threshold=0.9, agg='max'):
+    """
+    Find regions in the target feature map that match the reference object (all its patches) using torch's CosineSimilarity.
+
+    :param features_b: [N, C] tensor of target frame features (tokens).
+    :param features_ref: [M, C] tensor of reference object features (tokens).
+    :param similarity_threshold: float, threshold for similarity.
+    :param agg: 'max' or 'mean' for aggregation.
+    :return: List of arrays of token indices per region.
+    """
+    # Normalize features
+    features_b = torch.nn.functional.normalize(features_b, dim=1)
+    features_ref = torch.nn.functional.normalize(features_ref, dim=1)
+
+    # Compute pairwise cosine similarity [N, M]
+    cos = torch.nn.CosineSimilarity(dim=1)
+    sim_matrix = torch.stack([cos(features_b, ref.expand_as(features_b)) for ref in features_ref], dim=1)  # [N, M]
+
+    # Aggregate similarity for each target patch
+    if agg == 'max':
+        sim_map, _ = torch.max(sim_matrix, dim=1)  # [N]
+    else:
+        sim_map = torch.mean(sim_matrix, dim=1)    # [N]
+
+    # Threshold to get mask
+    mask = (sim_map > similarity_threshold).cpu().numpy().astype(np.uint8)
+
+    # Refine mask
+    kernel = np.ones((3, 3), np.uint8)
+    mask_refined = cv2.morphologyEx(mask.reshape(-1, 1), cv2.MORPH_CLOSE, kernel)
+    mask_refined = cv2.dilate(mask_refined, kernel, iterations=1)
+    mask_refined = mask_refined.squeeze()
+
+    # Label connected regions
+    labeled = label(mask_refined, connectivity=1)
+    regions = []
+    for region_id in range(1, labeled.max() + 1):
+        region_indices = np.where(labeled == region_id)[0]
+        if len(region_indices) > 0:
+            regions.append(region_indices)
+    return regions
+
+def find_regions_by_reference_descriptor(features, ref_descriptor, similarity_threshold=0.9):
+    """
+    Find regions in the feature map that match the reference descriptor.
+
+    :param features: [N, C] tensor of target frame features (tokens).
+    :param ref_descriptor: [1, C] reference descriptor.
+    :param similarity_threshold: float, threshold for similarity.
+    :return: List of arrays of token indices per region.
+    """
+    # Normalize features and reference descriptor
+    # features = torch.nn.functional.normalize(features, dim=1)
+    # ref_descriptor = torch.nn.functional.normalize(ref_descriptor, dim=1)
+    cos = torch.nn.CosineSimilarity(dim=1)
+    sim_map = cos(features, ref_descriptor.expand_as(features))  # [N]
+
+    # Compute similarity map
+    #sim_map = torch.matmul(features, ref_descriptor.T).squeeze(-1)  # [N]
+
+    # Threshold to get mask
+    mask = (sim_map > similarity_threshold).cpu().numpy().astype(np.uint8)
+    print(mask.shape)
+    # Find connected regions (using skimage)
+    from skimage.measure import label
+    labeled = label(mask, connectivity=1)
+    kernel = np.ones((3, 3), np.uint8)  # You can try larger kernels for more smoothing
+    mask_refined = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask_refined = cv2.dilate(mask_refined, kernel, iterations=1)
+
+    # Now label connected regions
+    labeled = label(mask_refined, connectivity=2)  # 2 for diagonal connectivity
+
+    # Extract regions as before
+    regions = []
+    for region_id in range(1, labeled.max() + 1):
+        region_indices = np.where(labeled == region_id)
+        indices_flat = np.ravel_multi_index(region_indices, mask_refined.shape)
+        if len(indices_flat) > 0:
+            regions.append(indices_flat)
+    # regions = []
+    # for region_id in range(1, labeled.max() + 1):
+    #     region_indices = np.where(labeled == region_id)[0]
+    #     if len(region_indices) > 0:
+    #         regions.append(region_indices)
+    return regions  # List of arrays of token indices per region
+
+def preprocess_mask(mask_path):
+    mask = Image.open(mask_path).convert('L')
+    mask = mask.resize((14, 14), resample=Image.NEAREST)
+    mask_tensor = torch.from_numpy(np.array(mask)).float()
+    mask_tensor = (mask_tensor > 128).float()  # Binarize
+    return mask_tensor
+
+def compute_single_token_descriptor(features, num_patches, mask_path=None, device='cuda'):
+    B, N, C = features.shape
+    H_feat, W_feat = num_patches[0], num_patches[1]
+    features = features[0].reshape(H_feat, W_feat, C)  # [H, W, C]
+
+    if mask_path:
+        mask_tensor = preprocess_mask(mask_path).to(device)
+        mask_tensor = F.interpolate(mask_tensor.unsqueeze(0).unsqueeze(0), size=(H_feat, W_feat), mode='nearest')[0, 0]
+        idx = torch.nonzero(mask_tensor)
+        # Use the center of the mask as the token location
+        y, x = idx.float().mean(dim=0).long()
+    else:
+        y, x = H_feat // 2, W_feat // 2  # Center token
+
+    descriptor = features[y, x]  # [C]
+    descriptor = torch.nn.functional.normalize(descriptor.unsqueeze(0), dim=1)  # [1, C]
+    return descriptor
 
 def rotate_landmarks(image_shape, landmarks, angle):
     """
@@ -590,7 +670,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Facilitate similarity inspection between two images.')
     parser.add_argument('--image_a', type=str, default="../data/dino/landmark_files/pipette_s.png", help='Path to the reference image.')
     parser.add_argument('--mask_file', default="../data/dino/landmark_files/pipette_s_mask.png", type=str, help="A semantic mask can be added to focus on the target object.")
-    parser.add_argument('--image_b', type=str, default="../data/dino/", help='Path to the target images.')
+    parser.add_argument('--image_b', type=str, default="../data/dino/pipette/test_7.png", help='Path to the target images.')
     parser.add_argument('--load_size', default=224, type=int, help='load size of the input image.')
     parser.add_argument('--stride', default=14, type=int, help="stride of first convolution layer. small stride -> higher resolution.")
     parser.add_argument('--model_type', default='dinov2_vits14', type=str,
@@ -612,7 +692,7 @@ if __name__ == "__main__":
 
     with torch.no_grad():
         selected_pts=[]
-        landmarks = show_similarity_interactive(args.image_a, cv2.VideoCapture(0), args.mask_file, args.num_ref_points,
+        landmarks = show_similarity_interactive(args.image_a, cv2.VideoCapture(0),args.mask_file, args.image_b,args.num_ref_points,
                                                 args.load_size,
                                                 args.layer, args.facet, args.bin,
                                                 args.stride, args.model_type, args.num_sim_patches,
