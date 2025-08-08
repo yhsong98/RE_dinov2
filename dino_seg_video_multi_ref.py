@@ -10,7 +10,6 @@ from sklearn.cluster import KMeans
 
 # Load DINOv2 ViT-b/14 from Torch Hub
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-print(device)
 model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14').to(device)
 model.eval()
 
@@ -225,19 +224,20 @@ def run_reference_based_segmentation_clustered(ref_img_path, ref_mask_path, came
 
 # ==== Run Here ====
 if __name__ == "__main__":
-    n_clusters = 10
-    granularity = 448*2
+    n_clusters = 5
+    granularity = 448
     colors = get_cluster_colors(n_clusters, seed=42)
     #pipette_3D_greybg.png
     #pipette_3D_greybg_mask.png
-    visualize_reference_clusters('../data/dino/landmark_files/face.png'
-                                 ,'../data/dino/landmark_files/face_mask.png'
+    object = 'pipette_s'
+    visualize_reference_clusters(f'../data/dino/landmark_files/{object}.png'
+                                 ,f'../data/dino/landmark_files/{object}_mask.png'
                                  , n_clusters=n_clusters
                                  , granularity=granularity
                                  , colors=colors)
     run_reference_based_segmentation_clustered(
-        '../data/dino/landmark_files/face.png',
-        '../data/dino/landmark_files/face_mask.png',
+        f'../data/dino/landmark_files/{object}.png',
+        f'../data/dino/landmark_files/{object}_mask.png',
         camera_id=0,
         n_clusters=n_clusters,
         granularity=granularity,

@@ -69,3 +69,76 @@ for idx, cam_pos in enumerate(cam_positions):
     np.save(f'./rendered_views/pose_{idx:04d}.npy', pose)
 
 renderer.delete()
+
+import trimesh
+import pyrender
+import numpy as np
+import cv2
+import time
+
+OBJ_PATH = '/home/nml/projects/data/dino/3D_models/satorius_picus2_5000/picus2_5000.obj'
+REF_IMAGE_PATH = 'reference_view.png'
+MASK_PATH = 'reference_mask.png'
+
+# Load mesh with textures/materials
+trimesh_mesh = trimesh.load(OBJ_PATH, force='mesh', process=False)
+scene = pyrender.Scene()
+mesh = pyrender.Mesh.from_trimesh(trimesh_mesh, smooth=False)
+directions = [
+    np.eye(4),
+    np.array([[1,0,0,0],[0,0,-1,0],[0,1,0,0],[0,0,0,1]]),
+    np.array([[1,0,0,0],[0,0,1,0],[0,-1,0,0],[0,0,0,1]]),
+    np.array([[0,0,1,0],[0,1,0,0],[-1,0,0,0],[0,0,0,1]]),
+]
+for pose in directions[1:]:
+    light = pyrender.DirectionalLight(color=np.ones(3), intensity=10.0)
+    scene.add(light, pose=pose)
+scene.add(mesh)
+
+capture_flag = {'capture': False}
+
+class CustomViewer(pyrender.Viewer):
+    def on_key_press(self, symbol, modifiers):
+        # 121 is the keycode for 'y'
+        if symbol == 121:
+            capture_flag['capture'] = True
+        super().on_key_press(symbol, modifiers)
+
+v = CustomViewer(
+    scene,
+    use_raymond_lighting=True,
+    run_in_thread=False
+)
+
+print("Rotate the model. Press 'y' in the viewer window to capture the current view.")
+
+while v.is_active:
+    if capture_flag['capture']:
+        # Create a new scene and mesh for offscreen rendering
+        offscreen_scene = pyrender.Scene()
+        offscreen_mesh = pyrender.Mesh.from_trimesh(trimesh_mesh, smooth=False)
+        for pose in directions[1:]:
+            light = pyrender.DirectionalLight(color=np.ones(3), intensity=10.0)
+            offscreen_scene.add(light, pose=pose)
+        offscreen_scene.add(offscreen_mesh)
+        # Copy camera pose from viewer
+        camera_node = None
+        for node in v.scene.get_nodes():
+            if isinstance(node.camera, pyrender.Camera):
+                camera_node = node
+                break
+
+        if camera_node is not None:
+            cam = camera_node.camera
+            cam_pose = v.scene.get_pose(camera_node)
+            offscreen_scene.add(cam, pose=cam_pose)
+        renderer = pyrender.OffscreenRenderer(viewport_width=640, viewport_height=480)
+        color, depth = renderer.render(offscreen_scene)
+        mask = (depth > 0).astype(np.uint8) * 255
+
+        cv2.imwrite(REF_IMAGE_PATH, cv2.cvtColor(color, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(MASK_PATH, mask)
+        print(f"Saved reference image to {REF_IMAGE_PATH} and mask to {MASK_PATH}")
+        capture_flag['capture'] = False
+        continue
+    time.sleep(0.05)
