@@ -1,15 +1,15 @@
 import cv2
-
+import time
 def igen_frames():
     cap = cv2.VideoCapture(0) #resolved, correct position
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
 
     if not cap.isOpened():
         print("Cannot open camera")
-        exit()
+
     while True:
         # Capture frame-by-frame
         ret, frame = cap.read()
-
         # if frame is read correctly ret is True
         if not ret:
             print("Can't receive frame (stream end?). Exiting ...")

@@ -10,6 +10,7 @@ from sklearn.cluster import KMeans
 
 # Load DINOv2 ViT-b/14 from Torch Hub
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(device)
 model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14').to(device)
 model.eval()
 
@@ -196,6 +197,7 @@ def run_reference_based_segmentation_clustered(ref_img_path, ref_mask_path, came
     ref_descriptors = compute_reference_descriptors_clustered(ref_img_path, ref_mask_path, n_clusters, granularity)
     transform = get_transform(granularity)
     cap = cv2.VideoCapture(camera_id)
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
     if not cap.isOpened():
         print("Cannot open camera")
         return
@@ -223,19 +225,19 @@ def run_reference_based_segmentation_clustered(ref_img_path, ref_mask_path, came
 
 # ==== Run Here ====
 if __name__ == "__main__":
-    n_clusters = 5
+    n_clusters = 10
     granularity = 448*2
     colors = get_cluster_colors(n_clusters, seed=42)
     #pipette_3D_greybg.png
     #pipette_3D_greybg_mask.png
-    visualize_reference_clusters('/home/nml/projects/data/dino/landmark_files/face.png'
-                                 ,'/home/nml/projects/data/dino/landmark_files/face_mask.png'
+    visualize_reference_clusters('../data/dino/landmark_files/face.png'
+                                 ,'../data/dino/landmark_files/face_mask.png'
                                  , n_clusters=n_clusters
                                  , granularity=granularity
                                  , colors=colors)
     run_reference_based_segmentation_clustered(
-        '/home/nml/projects/data/dino/landmark_files/face.png',
-        '/home/nml/projects/data/dino/landmark_files/face_mask.png',
+        '../data/dino/landmark_files/face.png',
+        '../data/dino/landmark_files/face_mask.png',
         camera_id=0,
         n_clusters=n_clusters,
         granularity=granularity,
